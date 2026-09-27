@@ -18,9 +18,10 @@ from scripts.config import (
     missing_environment,
 )
 from scripts.db import build_engine
-from scripts.extract import collect
+from scripts.extract import SourceLayoutError, collect
 from scripts.init_db import init_db
 from scripts.metadata import upsert_metadata
+from scripts.releases import LAYOUT_CHANGED, classify_evidence, stored_release
 from scripts.run_logs import insert_run_log
 from scripts.time_series import get_last_observations, upsert_time_series
 
@@ -76,15 +77,25 @@ def main(args: argparse.Namespace) -> int:
     try:
         init_db(engine)
         start = _start_date(engine, args.start_date)
-        data = collect()
+        try:
+            data = collect()
+        except SourceLayoutError:
+            logger.error("release_status=%s", LAYOUT_CHANGED)
+            raise
         observations = [item for item in data.observations if item.reference_date >= start]
         if not observations:
             raise ValueError(f"SPI source has no observations since {start}")
         collected_at = datetime.now(UTC)
         with engine.begin() as conn:
+            previous = {e.name: stored_release(conn, sorted(e.series_ids)) for e in data.releases}
             result = upsert_time_series(conn, observations, collected_at)
             inserted, updated = upsert_metadata(conn, data.catalog, collected_at)
-        logger.info("observations=%d new=%d revised=%d metadata_inserted=%d metadata_updated=%d", len(observations), result.new_observations, result.new_vintages, inserted, updated)
+            # Classified inside the transaction: a publication date that goes
+            # backwards raises and rolls this run's writes back.
+            statuses = {e.name: classify_evidence(e, previous[e.name], result.written_keys) for e in data.releases}
+        for evidence in data.releases:
+            logger.info("release_status=%s source=%s published=%s latest=%s url=%s", statuses[evidence.name], evidence.name, evidence.published, evidence.latest_reference, evidence.url)
+        logger.info("observations=%d new=%d revised=%d same_day=%d metadata_inserted=%d metadata_updated=%d", len(observations), result.new_observations, result.new_vintages, result.same_day_updates, inserted, updated)
     finally:
         engine.dispose()
     return 0
