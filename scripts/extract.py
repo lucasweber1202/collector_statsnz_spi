@@ -18,6 +18,7 @@ from urllib.parse import urljoin
 import httpx
 
 from scripts.config import REQUEST_TIMEOUT, USER_AGENT
+from scripts.releases import ReleaseEvidence
 from scripts.time_series import Observation
 
 logger = logging.getLogger(__name__)
@@ -25,13 +26,24 @@ COUNTRY_CURRENCY = "NZD"
 SOURCE_ROOT = "https://www.stats.govt.nz"
 MAX_STALE_MONTHS = 2
 MIN_HISTORY_YEARS = 3
+MIN_PAYLOAD_BYTES = 100_000
+MIN_SOURCE_ROWS = 20_000
 FIELDS = {"Series_reference", "Period", "Data_value", "STATUS", "UNITS", "Group", "Series_title_1", "Series_title_2", "Series_title_3"}
+
+
+class SourceLayoutError(ValueError):
+    """The official release page or CSV no longer has the audited layout."""
+
+
+class SourceAccessError(RuntimeError):
+    """The source answered with something other than the requested file."""
 
 
 @dataclass(frozen=True)
 class SourceData:
     observations: list[Observation]
     catalog: dict[str, dict[str, Any]]
+    releases: tuple[ReleaseEvidence, ...] = ()
 
 
 def build_series_id(native: str) -> str:
@@ -65,9 +77,24 @@ def discover_csv(client: httpx.Client, today: date) -> tuple[str, date, str]:
         match = re.search(r'"DocumentLink":"([^"]+\.csv)"', markup, re.IGNORECASE)
         published = re.search(r'"PublicationDate":"(\d{4}-\d{2}-\d{2})', markup)
         if not match or not published:
-            raise ValueError(f"Stats NZ release layout changed: {page}")
+            raise SourceLayoutError(f"Stats NZ release layout changed: {page}")
         return urljoin(SOURCE_ROOT, match.group(1).replace("\\/", "/")), date.fromisoformat(published.group(1)), page
-    raise ValueError("No recent official SPI release found")
+    raise SourceAccessError("No recent official SPI release found")
+
+
+def check_payload(response: httpx.Response) -> bytes:
+    """Refuse an HTML challenge or error page before it can be parsed as CSV."""
+    response.raise_for_status()
+    blob = response.content
+    content_type = response.headers.get("content-type", "").lower()
+    head = blob[:512].lstrip().lower()
+    if "text/html" in content_type or head.startswith((b"<!doctype", b"<html")):
+        raise SourceAccessError(f"Stats NZ returned HTML instead of CSV: {response.url}")
+    if not blob.removeprefix(b"\xef\xbb\xbf").lstrip(b'"').startswith(b"Series_reference"):
+        raise SourceLayoutError(f"Stats NZ CSV does not start with the audited header: {response.url}")
+    if len(blob) < MIN_PAYLOAD_BYTES:
+        raise SourceAccessError(f"Stats NZ CSV is implausibly small ({len(blob)} bytes)")
+    return blob
 
 
 def _selected(group: str, unit: str) -> bool:
@@ -76,15 +103,18 @@ def _selected(group: str, unit: str) -> bool:
             and "Weighted Average Prices" not in group and "Seasonally adjusted" not in group)
 
 
-def parse_csv(blob: bytes, url: str, published: date) -> SourceData:
+def parse_csv(blob: bytes, url: str, published: date, min_rows: int = MIN_SOURCE_ROWS) -> SourceData:
     """Parse finite index levels, native metadata, and monthly period ends."""
     reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig")))
     if not reader.fieldnames or not FIELDS.issubset(reader.fieldnames):
-        raise ValueError("SPI CSV header changed")
+        raise SourceLayoutError("SPI CSV header changed")
     catalog: dict[str, dict[str, Any]] = {}
     observations: list[Observation] = []
+    seen: set[tuple[str, date]] = set()
     snapshot = hashlib.sha256(blob).hexdigest()
+    rows = 0
     for row in reader:
+        rows += 1
         group = row["Group"]
         if not _selected(group, row["UNITS"]):
             continue
@@ -112,9 +142,14 @@ def parse_csv(blob: bytes, url: str, published: date) -> SourceData:
             raise ValueError(f"Invalid SPI value {raw!r} for {sid}") from exc
         if not math.isfinite(value) or row["STATUS"] not in {"FINAL", "REVISED", "PROVISIONAL"}:
             raise ValueError(f"Invalid SPI value/status for {sid} on {ref}")
+        if (sid, ref) in seen:
+            raise ValueError(f"Duplicate SPI economic key: {sid} {ref}")
+        seen.add((sid, ref))
         observations.append(Observation(sid, ref, value, snapshot))
+    if rows < min_rows:
+        raise SourceLayoutError(f"SPI CSV has {rows} rows; expected at least {min_rows}")
     if not observations:
-        raise ValueError("SPI returned no selected observations")
+        raise SourceLayoutError("SPI returned no selected observations")
     return SourceData(observations, catalog)
 
 
@@ -142,7 +177,14 @@ def collect() -> SourceData:
     with httpx.Client(timeout=REQUEST_TIMEOUT, headers={"User-Agent": USER_AGENT}) as client:
         url, published, page = discover_csv(client, datetime.now(UTC).date())
         response = client.get(url)
-        response.raise_for_status()
-    parsed = parse_csv(response.content, url, published)
+    parsed = parse_csv(check_payload(response), url, published)
     logger.info("%s: %d candidate series and %d observations", page, len(parsed.catalog), len(parsed.observations))
-    return filter_usable_series(parsed, datetime.now(UTC).date())
+    usable = filter_usable_series(parsed, datetime.now(UTC).date())
+    evidence = ReleaseEvidence(
+        "selected_price_indexes_csv",
+        url,
+        published,
+        max(o.reference_date for o in usable.observations),
+        frozenset(usable.catalog),
+    )
+    return SourceData(usable.observations, usable.catalog, (evidence,))
