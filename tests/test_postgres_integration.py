@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 
 from scripts import init_db, metadata, run_logs, time_series
 from scripts.config import COUNTRY_CURRENCY, SCHEMA_NAME
@@ -193,6 +194,8 @@ def test_metadata_merge_accepts_null_in_every_nullable_column(engine: Engine) ->
         country=COUNTRY_CURRENCY,
         observation_count=1,
         source_url="https://example.invalid/x",
+        eco_group=catalog[series_id]["eco_group"],
+        last_publish_date=DAY1.date(),
         collected_at=DAY1,
     )
     with engine.begin() as conn:
@@ -204,8 +207,6 @@ def test_metadata_merge_accepts_null_in_every_nullable_column(engine: Engine) ->
         "unit",
         "first_observation",
         "last_observation",
-        "eco_group",
-        "last_publish_date",
     ):
         assert stored[column] is None, column
     _, counts = _write(engine, observations, catalog, DAY1 + timedelta(days=1))
@@ -266,3 +267,37 @@ def test_release_status_from_stored_state(engine: Engine) -> None:
     assert classify_release(previous, published, latest, 1) == REVISED_SOURCE
     later = None if published is None else published + timedelta(days=7)
     assert classify_release(previous, later, latest + timedelta(days=7), 1) == NEW_RELEASE
+
+
+@pytest.mark.parametrize("column", ["eco_group", "last_publish_date"])
+def test_required_metadata_columns_reject_null(engine: Engine, column: str) -> None:
+    """Masuko section 3 requires both fields even for undated sources."""
+    observations, catalog = _sample()
+    _write(engine, observations, catalog, DAY1)
+    with pytest.raises(IntegrityError), engine.begin() as conn:
+        conn.execute(text(f"UPDATE {SCHEMA_NAME}.metadata SET {column} = NULL"))
+
+
+def test_metadata_fallback_uses_stored_collection_date(engine: Engine) -> None:
+    """An undated source gets MAX(collected_at), not the reference date."""
+    observations, catalog = _sample()
+    undated = {sid: {**fields, "last_publish_date": None} for sid, fields in catalog.items()}
+    _write(engine, observations, undated, DAY1)
+    before = _rows(engine, "metadata")
+    assert {row["last_publish_date"] for row in before} == {DAY1.date()}
+    _, counts = _write(engine, observations, undated, DAY1 + timedelta(days=3))
+    assert counts == (0, 0)
+    assert _rows(engine, "metadata") == before
+
+
+def test_metadata_batches_log_progress(engine: Engine, caplog: pytest.LogCaptureFixture) -> None:
+    """An operator sees each completed metadata batch in the captured log."""
+    observations, catalog = _sample()
+    with caplog.at_level("INFO", logger="scripts.metadata"):
+        _write(engine, observations, catalog, DAY1)
+        changed = {
+            sid: {**fields, "description": "revised description"} for sid, fields in catalog.items()
+        }
+        _write(engine, observations, changed, DAY1 + timedelta(days=1))
+    assert "Inserted batch 1/1" in caplog.text
+    assert "Updated batch 1/1" in caplog.text
