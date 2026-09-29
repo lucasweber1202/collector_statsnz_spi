@@ -28,7 +28,17 @@ MAX_STALE_MONTHS = 2
 MIN_HISTORY_YEARS = 3
 MIN_PAYLOAD_BYTES = 100_000
 MIN_SOURCE_ROWS = 20_000
-FIELDS = {"Series_reference", "Period", "Data_value", "STATUS", "UNITS", "Group", "Series_title_1", "Series_title_2", "Series_title_3"}
+FIELDS = {
+    "Series_reference",
+    "Period",
+    "Data_value",
+    "STATUS",
+    "UNITS",
+    "Group",
+    "Series_title_1",
+    "Series_title_2",
+    "Series_title_3",
+}
 
 
 class SourceLayoutError(ValueError):
@@ -78,7 +88,11 @@ def discover_csv(client: httpx.Client, today: date) -> tuple[str, date, str]:
         published = re.search(r'"PublicationDate":"(\d{4}-\d{2}-\d{2})', markup)
         if not match or not published:
             raise SourceLayoutError(f"Stats NZ release layout changed: {page}")
-        return urljoin(SOURCE_ROOT, match.group(1).replace("\\/", "/")), date.fromisoformat(published.group(1)), page
+        return (
+            urljoin(SOURCE_ROOT, match.group(1).replace("\\/", "/")),
+            date.fromisoformat(published.group(1)),
+            page,
+        )
     raise SourceAccessError("No recent official SPI release found")
 
 
@@ -91,7 +105,9 @@ def check_payload(response: httpx.Response) -> bytes:
     if "text/html" in content_type or head.startswith((b"<!doctype", b"<html")):
         raise SourceAccessError(f"Stats NZ returned HTML instead of CSV: {response.url}")
     if not blob.removeprefix(b"\xef\xbb\xbf").lstrip(b'"').startswith(b"Series_reference"):
-        raise SourceLayoutError(f"Stats NZ CSV does not start with the audited header: {response.url}")
+        raise SourceLayoutError(
+            f"Stats NZ CSV does not start with the audited header: {response.url}"
+        )
     if len(blob) < MIN_PAYLOAD_BYTES:
         raise SourceAccessError(f"Stats NZ CSV is implausibly small ({len(blob)} bytes)")
     return blob
@@ -99,11 +115,17 @@ def check_payload(response: httpx.Response) -> bytes:
 
 def _selected(group: str, unit: str) -> bool:
     """Retain original monthly CPI components, food indexes and rents."""
-    return (unit == "Index" and group.startswith(("CPI ", "Food Price Index "))
-            and "Weighted Average Prices" not in group and "Seasonally adjusted" not in group)
+    return (
+        unit == "Index"
+        and group.startswith(("CPI ", "Food Price Index "))
+        and "Weighted Average Prices" not in group
+        and "Seasonally adjusted" not in group
+    )
 
 
-def parse_csv(blob: bytes, url: str, published: date, min_rows: int = MIN_SOURCE_ROWS) -> SourceData:
+def parse_csv(
+    blob: bytes, url: str, published: date, min_rows: int = MIN_SOURCE_ROWS
+) -> SourceData:
     """Parse finite index levels, native metadata, and monthly period ends."""
     reader = csv.DictReader(io.StringIO(blob.decode("utf-8-sig")))
     if not reader.fieldnames or not FIELDS.issubset(reader.fieldnames):
@@ -119,12 +141,21 @@ def parse_csv(blob: bytes, url: str, published: date, min_rows: int = MIN_SOURCE
         if not _selected(group, row["UNITS"]):
             continue
         sid = build_series_id(row["Series_reference"])
-        titles = [v for key in ("Series_title_1", "Series_title_2", "Series_title_3") if (v := row[key]) not in ("", "NA")]
-        descriptor = {"name": " / ".join(titles) or row["Series_reference"],
-                      "description": f"Stats NZ SPI {group}; official code {row['Series_reference']}",
-                      "country": COUNTRY_CURRENCY, "frequency": "monthly", "unit": "index",
-                      "eco_group": "consumer_prices", "source_url": url,
-                      "last_publish_date": published}
+        titles = [
+            v
+            for key in ("Series_title_1", "Series_title_2", "Series_title_3")
+            if (v := row[key]) not in ("", "NA")
+        ]
+        descriptor = {
+            "name": " / ".join(titles) or row["Series_reference"],
+            "description": f"Stats NZ SPI {group}; official code {row['Series_reference']}",
+            "country": COUNTRY_CURRENCY,
+            "frequency": "monthly",
+            "unit": "index",
+            "eco_group": "consumer_prices",
+            "source_url": url,
+            "last_publish_date": published,
+        }
         if sid in catalog and catalog[sid] != descriptor:
             raise ValueError(f"Metadata conflict: {sid}")
         catalog[sid] = descriptor
@@ -169,7 +200,10 @@ def filter_usable_series(data: SourceData, today: date) -> SourceData:
             logger.info("Dropped %s: stale=%d months, history=%d months", sid, stale, history)
     if not keep:
         raise ValueError("No usable SPI series")
-    return SourceData([o for o in data.observations if o.series_id in keep], {s: v for s, v in data.catalog.items() if s in keep})
+    return SourceData(
+        [o for o in data.observations if o.series_id in keep],
+        {s: v for s, v in data.catalog.items() if s in keep},
+    )
 
 
 def collect() -> SourceData:
@@ -178,7 +212,12 @@ def collect() -> SourceData:
         url, published, page = discover_csv(client, datetime.now(UTC).date())
         response = client.get(url)
     parsed = parse_csv(check_payload(response), url, published)
-    logger.info("%s: %d candidate series and %d observations", page, len(parsed.catalog), len(parsed.observations))
+    logger.info(
+        "%s: %d candidate series and %d observations",
+        page,
+        len(parsed.catalog),
+        len(parsed.observations),
+    )
     usable = filter_usable_series(parsed, datetime.now(UTC).date())
     evidence = ReleaseEvidence(
         "selected_price_indexes_csv",

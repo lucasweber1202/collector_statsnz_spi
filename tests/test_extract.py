@@ -39,7 +39,11 @@ def test_live_source_cells_and_filters() -> None:
     keys = [(o.series_id, o.reference_date) for o in retained.observations]
     assert len(keys) == len(set(keys))
     native_id = "CPIM.SE9072020000"
-    rows = [r for r in csv.DictReader(io.StringIO(response.content.decode("utf-8-sig"))) if r["Series_reference"] == native_id and r["Data_value"]]
+    rows = [
+        r
+        for r in csv.DictReader(io.StringIO(response.content.decode("utf-8-sig")))
+        if r["Series_reference"] == native_id and r["Data_value"]
+    ]
     selected = [rows[0], rows[len(rows) // 2], rows[-1]]
     observed = {(o.series_id, o.reference_date): o.value for o in retained.observations}
     for row in selected:
