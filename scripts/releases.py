@@ -112,7 +112,9 @@ def classify_release(
 
 
 def classify_evidence(
-    evidence: ReleaseEvidence, previous: StoredRelease | None, written_keys: list[tuple[str, date, date]]
+    evidence: ReleaseEvidence,
+    previous: StoredRelease | None,
+    written_keys: list[tuple[str, date, date]],
 ) -> str:
     """Classify one file after this run's writes, inside the same transaction."""
     changed = sum(1 for key in written_keys if key[0] in evidence.series_ids)

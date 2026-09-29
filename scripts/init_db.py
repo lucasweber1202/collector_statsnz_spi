@@ -51,7 +51,12 @@ def init_db(engine: Engine) -> None:
     """Create the schema and tables idempotently."""
     double_type = "DOUBLE PRECISION" if engine.dialect.name == "postgresql" else "DOUBLE"
     with engine.begin() as conn:
-        for statement in (CREATE_SCHEMA, CREATE_METADATA_TABLE, CREATE_TIME_SERIES_TABLE.format(double_type=double_type), CREATE_LOGS_TABLE):
+        for statement in (
+            CREATE_SCHEMA,
+            CREATE_METADATA_TABLE,
+            CREATE_TIME_SERIES_TABLE.format(double_type=double_type),
+            CREATE_LOGS_TABLE,
+        ):
             conn.execute(text(statement))
 
 

@@ -92,10 +92,28 @@ def main(args: argparse.Namespace) -> int:
             inserted, updated = upsert_metadata(conn, data.catalog, collected_at)
             # Classified inside the transaction: a publication date that goes
             # backwards raises and rolls this run's writes back.
-            statuses = {e.name: classify_evidence(e, previous[e.name], result.written_keys) for e in data.releases}
+            statuses = {
+                e.name: classify_evidence(e, previous[e.name], result.written_keys)
+                for e in data.releases
+            }
         for evidence in data.releases:
-            logger.info("release_status=%s source=%s published=%s latest=%s url=%s", statuses[evidence.name], evidence.name, evidence.published, evidence.latest_reference, evidence.url)
-        logger.info("observations=%d new=%d revised=%d same_day=%d metadata_inserted=%d metadata_updated=%d", len(observations), result.new_observations, result.new_vintages, result.same_day_updates, inserted, updated)
+            logger.info(
+                "release_status=%s source=%s published=%s latest=%s url=%s",
+                statuses[evidence.name],
+                evidence.name,
+                evidence.published,
+                evidence.latest_reference,
+                evidence.url,
+            )
+        logger.info(
+            "observations=%d new=%d revised=%d same_day=%d metadata_inserted=%d metadata_updated=%d",
+            len(observations),
+            result.new_observations,
+            result.new_vintages,
+            result.same_day_updates,
+            inserted,
+            updated,
+        )
     finally:
         engine.dispose()
     return 0
@@ -120,7 +138,14 @@ if __name__ == "__main__":
         try:
             engine = build_engine()
             init_db(engine)
-            insert_run_log(engine, started_at=started_at, finished_at=finished_at, status=status, log_text=log_buffer.getvalue(), traceback_text=tb_text)
+            insert_run_log(
+                engine,
+                started_at=started_at,
+                finished_at=finished_at,
+                status=status,
+                log_text=log_buffer.getvalue(),
+                traceback_text=tb_text,
+            )
             engine.dispose()
         except Exception:
             logging.getLogger("main").exception("Could not persist run log")
