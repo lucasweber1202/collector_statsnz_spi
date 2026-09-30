@@ -21,7 +21,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from sqlalchemy import TextClause, bindparam, text
@@ -168,7 +168,7 @@ def _merge_statement(count: int) -> TextClause:
 
 def _batch_parameters(rows: list[dict[str, Any]]) -> dict[str, Any]:
     return {
-        f"{column}_{index}": row[column] for index, row in enumerate(rows) for column in _COLUMNS
+        f"{column}_{index}": (row[column].astimezone(UTC).replace(tzinfo=None) if isinstance(row[column], datetime) and row[column].tzinfo else row[column]) for index, row in enumerate(rows) for column in _COLUMNS
     }
 
 
@@ -217,6 +217,7 @@ def upsert_time_series(
     conn: Connection, observations: list[Observation], collected_at: datetime
 ) -> WriteResult:
     """Apply the fleet vintage rules to this run's observations."""
+    collected_at = collected_at.astimezone(UTC).replace(tzinfo=None) if collected_at.tzinfo else collected_at
     today = collected_at.date()
     # Pair each observation with its validated value: a null or non-finite
     # reading never reaches the table, and the pairing keeps that guarantee

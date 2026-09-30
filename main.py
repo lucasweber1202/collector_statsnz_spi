@@ -72,6 +72,8 @@ def main(args: argparse.Namespace) -> int:
     """Run source extraction and idempotent writes."""
     missing = missing_environment()
     if missing:
+        for problem in missing:
+            logger.error("Missing environment variable: %s", problem)
         raise RuntimeError(f"Missing environment variables: {', '.join(missing)}")
     engine = build_engine()
     try:
